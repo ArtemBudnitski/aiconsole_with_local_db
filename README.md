@@ -1,3 +1,30 @@
+# Recent Changes Summary
+
+## Database Integration and API Setup
+- Added SQLAlchemy and aiosqlite for database support
+- Created new migration system for handling data persistence
+- Fixed circular import issues in core modules
+- Implemented proper project saving and loading
+- Set up API endpoints for various features
+
+### Key Files Modified/Created:
+1. `backend/aiconsole/core/db/migration.py` - New migration module
+2. `backend/aiconsole/core/db/migrate.py` - Updated migration handling
+3. `backend/aiconsole/core/project/project.py` - Project management
+4. `backend/aiconsole/core/storage/db_storage.py` - Database storage
+5. `backend/aiconsole/core/assets/assets.py` - Asset management
+6. `backend/aiconsole/core/db/operations.py` - Database operations
+7. `pyproject.toml` - Dependencies configuration
+8. `backend/aiconsole/api/routers.py` - API routing setup
+
+### Features Implemented:
+- Database initialization and management
+- Project saving and loading
+- Asset management
+- Settings persistence
+- API endpoint routing
+- WebSocket support
+
 <h2 align="center"><img src="https://github.com/10clouds/aiconsole/assets/135703473/d48b7b40-4b9e-45af-92e4-2abc5a8a40b0" height="64"><br>AIConsole</h2>
 
 <p align="center"><strong>Open Source Desktop Alternative to OpenAI GPTs</strong></p>
