@@ -16,8 +16,10 @@
 
 import os
 import sys
+import json
+import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import BackgroundTasks
 
@@ -36,8 +38,20 @@ from aiconsole.core.code_running.run_code import reset_code_interpreters
 from aiconsole.core.code_running.virtual_env.create_dedicated_venv import (
     create_dedicated_venv,
 )
-from aiconsole.core.settings.fs.settings_file_storage import SettingsFileStorage
+from aiconsole.core.db.database import db
+from aiconsole.core.db.models import Project as ProjectModel
+from aiconsole.core.db.operations import DatabaseOperations
+from aiconsole.core.db.migration import migrate_all
+from aiconsole.core.project.init import is_project_initialized
+from aiconsole.core.project.paths import (
+    get_project_assets_directory,
+    get_project_chats_directory,
+    get_project_database_path,
+    get_project_path,
+    get_project_settings_path,
+)
 from aiconsole.core.settings.settings import settings
+from aiconsole.core.storage.db_storage import DatabaseStorage
 
 if TYPE_CHECKING:
     from aiconsole.core.assets import assets
@@ -46,6 +60,8 @@ if TYPE_CHECKING:
 _materials: "assets.Assets | None" = None
 _agents: "assets.Assets | None" = None
 _project_initialized = False
+
+_log = logging.getLogger(__name__)
 
 
 async def _clear_project():
@@ -89,16 +105,12 @@ def get_project_agents() -> "assets.Assets":
     return _agents
 
 
-def is_project_initialized() -> bool:
-    return _project_initialized
-
-
 async def close_project():
     await _clear_project()
 
     await connection_manager().send_to_all(ProjectClosedServerMessage())
 
-    settings().configure(SettingsFileStorage(project_path=None))
+    settings().configure(DatabaseStorage(project_path=None))
 
 
 async def reinitialize_project():
@@ -122,12 +134,28 @@ async def reinitialize_project():
 
     project_dir = get_project_directory()
 
+    # Check if project needs migration
+    if not DatabaseOperations.get_project(str(project_dir)):
+        # Project not in database, needs migration
+        print(f"Migrating project {project_dir} to database...")
+        migrate_all(project_dir)
+    else:
+        print(f"Project {project_dir} already in database")
+        # Save project to database (in case it needs updating)
+        project = ProjectModel(
+            id=str(project_dir),
+            name=project_dir.name,
+            path=str(project_dir)
+        )
+        DatabaseOperations.save_project(project)
+
     await add_to_recent_projects(project_dir)
+
+    # Configure settings with database storage
+    settings().configure(DatabaseStorage(project_path=project_dir))
 
     _agents = assets.Assets(asset_type=AssetType.AGENT)
     _materials = assets.Assets(asset_type=AssetType.MATERIAL)
-
-    settings().configure(SettingsFileStorage(project_path=get_project_directory_safe()))
 
     await connection_manager().send_to_all(
         ProjectOpenedServerMessage(path=str(get_project_directory()), name=get_project_name())
@@ -148,3 +176,56 @@ async def choose_project(path: Path, background_tasks: BackgroundTasks):
     await reinitialize_project()
 
     background_tasks.add_task(create_dedicated_venv)
+
+
+def initialize_project(project_path: Path, project_name: str) -> None:
+    """
+    Initializes a new project at the specified path.
+    """
+    # Create project directories
+    get_project_assets_directory().mkdir(parents=True, exist_ok=True)
+    get_project_chats_directory().mkdir(parents=True, exist_ok=True)
+    
+    # Create project settings
+    settings = {
+        "name": project_name,
+        "version": "1.0.0",
+    }
+    
+    with open(get_project_settings_path(), "w") as f:
+        json.dump(settings, f, indent=2)
+    
+    # Create project record in database
+    project = ProjectModel(
+        id=str(project_path),
+        name=project_name,
+        path=str(project_path),
+    )
+    db.save_project(project)
+    
+    _log.info(f"Project '{project_name}' initialized at {project_path}")
+
+
+def get_current_project() -> Optional[ProjectModel]:
+    """
+    Returns the current project if one is initialized.
+    """
+    if not is_project_initialized():
+        return None
+    
+    project_path = get_project_path()
+    return db.get_project(str(project_path))
+
+
+def set_current_project(project_path: Path) -> None:
+    """
+    Sets the current project path.
+    """
+    os.environ["AICONSOLE_PROJECT_PATH"] = str(project_path)
+    
+    # Initialize database if it doesn't exist
+    db_path = get_project_database_path()
+    if not db_path.exists():
+        db.initialize()
+    
+    _log.info(f"Current project set to {project_path}")

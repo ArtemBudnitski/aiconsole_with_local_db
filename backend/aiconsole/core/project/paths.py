@@ -16,19 +16,69 @@
 import logging
 import os
 from pathlib import Path
+from typing import Optional
 
 from aiconsole.core.assets.types import AssetType
-from aiconsole.core.project.project import is_project_initialized
+from aiconsole.core.project.init import is_project_initialized
 from aiconsole.utils.resource_to_path import resource_to_path
 
 _log = logging.getLogger(__name__)
 
 
-def get_project_assets_directory(asset_type: AssetType, project_path: Path | None = None):
-    if not is_project_initialized() and not project_path:
-        raise ValueError("Project settings are not initialized")
+def get_project_path() -> Path:
+    """
+    Returns the path to the current project.
+    If no project is initialized, returns the current working directory.
+    """
+    return Path(os.getenv("AICONSOLE_PROJECT_PATH", os.getcwd()))
 
-    return get_project_directory(project_path) / f"{asset_type.value}s"
+
+def get_project_assets_directory() -> Path:
+    """
+    Returns the path to the assets directory of the current project.
+    Creates the directory if it doesn't exist.
+    """
+    path = get_project_path() / "assets"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_project_settings_path() -> Path:
+    """
+    Returns the path to the settings file of the current project.
+    """
+    return get_project_path() / "settings.json"
+
+
+def get_project_chats_directory() -> Path:
+    """
+    Returns the path to the chats directory of the current project.
+    Creates the directory if it doesn't exist.
+    """
+    path = get_project_path() / "chats"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_project_chat_path(chat_id: str) -> Path:
+    """
+    Returns the path to a specific chat file in the current project.
+    """
+    return get_project_chats_directory() / f"{chat_id}.json"
+
+
+def get_project_asset_path(asset_id: str) -> Path:
+    """
+    Returns the path to a specific asset file in the current project.
+    """
+    return get_project_assets_directory() / f"{asset_id}.json"
+
+
+def get_project_database_path() -> Path:
+    """
+    Returns the path to the database file of the current project.
+    """
+    return get_project_path() / "aiconsole.db"
 
 
 def get_core_assets_directory(asset_type: AssetType):

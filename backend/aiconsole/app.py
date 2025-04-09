@@ -24,9 +24,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from aiconsole.api.routers import app_router
 from aiconsole.consts import log_config
+from aiconsole.core.db.database import db
 from aiconsole.core.project.paths import get_project_directory_safe
-from aiconsole.core.settings.fs.settings_file_storage import SettingsFileStorage
 from aiconsole.core.settings.settings import settings
+from aiconsole.core.storage.db_storage import DatabaseStorage
 
 if "BE_SENTRY_DSN" in os.environ:
     sentry_sdk.init(
@@ -40,7 +41,11 @@ logger = getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings().configure(SettingsFileStorage(project_path=get_project_directory_safe()))
+    # Initialize database
+    db.get_connection()
+    
+    # Configure settings with database storage
+    settings().configure(DatabaseStorage(project_path=get_project_directory_safe()))
     yield
 
 

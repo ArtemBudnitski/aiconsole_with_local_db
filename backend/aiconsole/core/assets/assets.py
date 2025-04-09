@@ -15,6 +15,7 @@
 # limitations under the License.
 import datetime
 import logging
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 import watchdog.events
 import watchdog.observers
@@ -29,21 +30,27 @@ from aiconsole.core.assets.types import Asset, AssetLocation, AssetStatus, Asset
 from aiconsole.core.project import project
 from aiconsole.core.project.paths import get_project_assets_directory
 from aiconsole.core.settings.settings import settings
+from aiconsole.core.storage.db_storage import create_storage
 from aiconsole.utils.BatchingWatchDogHandler import BatchingWatchDogHandler
 from aiconsole_toolkit.settings.partial_settings_data import PartialSettingsData
+from aiconsole.core.db.database import db
+from aiconsole.core.db.models import Asset as AssetModel
+from aiconsole.core.db.operations import DatabaseOperations
+
+if TYPE_CHECKING:
+    from aiconsole.core.project.project import Project
 
 _log = logging.getLogger(__name__)
 
 
 class Assets:
-    # _assets have lists, where the 1st element is the one overriding the others
-    # Currently there can be only 1 overriden element
-    _assets: dict[str, list[Asset]]
+    _assets: Dict[str, List[Asset]] = {}
+    _storage = None
 
     def __init__(self, asset_type: AssetType):
         self._suppress_notification_until: datetime.datetime | None = None
         self.asset_type = asset_type
-        self._assets = {}
+        self._storage = create_storage(project.get_project_path())
 
         self.observer = watchdog.observers.Observer()
 
@@ -55,48 +62,57 @@ class Assets:
         )
         self.observer.start()
 
+        self._load_assets()
+
     def stop(self):
         self.observer.stop()
 
-    def all_assets(self) -> list[Asset]:
-        """
-        Return all loaded assets.
-        """
-        return list(assets[0] for assets in self._assets.values())
+    def _load_assets(self) -> None:
+        """Load assets from database"""
+        assets = db.get_all_assets()
+        self._assets = {asset.id: asset for asset in assets if asset.type == self.asset_type}
 
-    def assets_with_status(self, status: AssetStatus) -> list[Asset]:
-        """
-        Return all loaded assets with a specific status.
-        """
-        return [
-            assets[0] for assets in self._assets.values() if self.get_status(self.asset_type, assets[0].id) == status
-        ]
+    async def load_assets(self):
+        """Load assets from database"""
+        self._assets = {}
+        
+        # Get all assets of this type
+        assets = self._storage.get_all_assets(self.asset_type)
+        
+        # Organize by ID
+        for asset in assets:
+            if asset.id not in self._assets:
+                self._assets[asset.id] = []
+            self._assets[asset.id].append(asset)
 
     async def save_asset(self, asset: Asset, old_asset_id: str, create: bool):
+        """Save asset to database"""
         if asset.defined_in != AssetLocation.PROJECT_DIR and not create:
             raise Exception("Cannot save asset not defined in project.")
 
-        exists_in_project = project_asset_exists_fs(self.asset_type, asset.id)
-        old_exists = project_asset_exists_fs(self.asset_type, old_asset_id)
+        # Check if asset exists
+        exists = self._storage.get_asset(self.asset_type, asset.id) is not None
+        old_exists = self._storage.get_asset(self.asset_type, old_asset_id) is not None
 
-        if create and exists_in_project:
+        if create and exists:
             create = False
 
-        if not create and not exists_in_project:
+        if not create and not exists:
             raise Exception(f"Asset {asset.id} does not exist.")
 
+        # Handle rename if needed
         rename = False
-        if create and old_asset_id and not exists_in_project and old_exists:
-            await move_asset_in_fs(asset.type, old_asset_id, asset.id)
-            Assets.rename_asset(asset.type, old_asset_id, asset.id)
+        if create and old_asset_id and not exists and old_exists:
+            self._storage.rename_asset(self.asset_type, old_asset_id, asset.id)
             rename = True
 
-        new_asset = await save_asset_to_fs(asset, old_asset_id)
+        # Save to database
+        self._storage.save_asset(asset)
 
+        # Update in-memory cache
         if asset.id not in self._assets:
             self._assets[asset.id] = []
 
-        # integrity checks and deleting old assets from structure
         if not create:
             if not self._assets[asset.id] or self._assets[asset.id][0].defined_in != AssetLocation.PROJECT_DIR:
                 raise Exception(f"Asset {asset.id} cannot be edited")
@@ -105,44 +121,42 @@ class Assets:
             if self._assets[asset.id] and self._assets[asset.id][0].defined_in == AssetLocation.PROJECT_DIR:
                 raise Exception(f"Asset {asset.id} already exists")
 
-        self._assets[asset.id].insert(0, new_asset)
+        self._assets[asset.id].insert(0, asset)
 
         self._suppress_notification()
 
         return rename
 
-    async def delete_asset(self, asset_id):
+    async def delete_asset(self, asset_id: str):
+        """Delete asset from database"""
         self._assets[asset_id].pop(0)
 
         if len(self._assets[asset_id]) == 0:
             del self._assets[asset_id]
 
-        delete_asset_from_fs(self.asset_type, asset_id)
+        self._storage.delete_asset(self.asset_type, asset_id)
 
         self._suppress_notification()
 
     def _suppress_notification(self):
         self._suppress_notification_until = datetime.datetime.now() + datetime.timedelta(seconds=10)
 
-    def get_asset(self, id, location: AssetLocation | None = None):
-        """
-        Get a specific asset.
-        """
-        if id not in self._assets or len(self._assets[id]) == 0:
-            return None
-
-        for asset in self._assets[id]:
-            if location is None or asset.defined_in == location:
-                return asset
-
+    def get_asset(self, id: str) -> Optional[Asset]:
+        """Get asset from in-memory cache"""
+        if id in self._assets and len(self._assets[id]) > 0:
+            return self._assets[id][0]
         return None
+
+    def get_all_assets(self) -> List[Asset]:
+        """Get all assets from in-memory cache"""
+        return [assets[0] for assets in self._assets.values() if len(assets) > 0]
 
     async def reload(self, initial: bool = False):
         from aiconsole.core.assets.load_all_assets import load_all_assets
 
         _log.info(f"Reloading {self.asset_type}s ...")
 
-        self._assets = await load_all_assets(self.asset_type)
+        await self.load_assets()
 
         await connection_manager().send_to_all(
             AssetsUpdatedServerMessage(
